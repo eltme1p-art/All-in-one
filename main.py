@@ -3,7 +3,7 @@ import os
 import json
 import re
 import asyncio
-import requests
+import httpx
 import feedparser
 from typing import Dict, Any, List, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
@@ -376,12 +376,10 @@ async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ تأكد أن البوت مشرف بالصلاحيات. الخطأ: {e}")
 
-# إضافة قناة Kick للبث التلقائي
 async def add_kick_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         return await update.message.reply_text("❌ غير مسموح لك")
     try:
-        # الصيغة: /addkick username تليجرام_ المستهدف
         username = context.args[0]
         target_chat = context.args[1]
         kick_channels = load_kick_channels()
@@ -720,7 +718,7 @@ def get_latest_video(channel_id):
         url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
         feed = feedparser.parse(url)
         if not feed.entries:
-            return None, None, None
+            return None, None, None, None
         entry = feed.entries[0]
         video_id = entry.yt_videoid
         title = entry.title
@@ -800,7 +798,7 @@ async def yt_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(
                 chat_id=target_channel,
                 photo=video["thumb"],
-            caption=caption,
+                caption=caption,
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("⤶ الـدخـول للـمـقـطـع ⤷", url=video["url"])]
@@ -811,7 +809,7 @@ async def yt_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"❌ فشل الإرسال:\n{e}")
 
 # ----------------------------
-# Background Auto-Checker (YouTube & Kick Live Streams)
+# Background Auto-Checker (YouTube & Kick Live Streams using httpx)
 # ----------------------------
 async def background_live_checker(app: Application):
     while True:
@@ -824,11 +822,9 @@ async def background_live_checker(app: Application):
             for name, info in yt_channels.items():
                 title, url, thumb, video_id = get_latest_video(info["id"])
                 if video_id and status_data.get(f"yt_{name}") != video_id:
-                    # تم نزول فيديو/بث جديد
                     status_data[f"yt_{name}"] = video_id
                     save_live_status(status_data)
                     
-                    # إرسال تلقائي للقنوات المفعّلة للإرسال العام أو القنوات المسجلة
                     channels = get_channels()
                     active_tg = [ch for ch, meta in channels.items() if meta.get("active")]
                     
@@ -841,12 +837,17 @@ async def background_live_checker(app: Application):
                         except Exception:
                             pass
 
-            # 2. فحص منصة Kick
+            # 2. فحص منصة Kick باستخدام httpx
             kick_channels = load_kick_channels()
             for username, meta in kick_channels.items():
                 target_chat = meta.get("target_chat")
                 try:
-                    res = requests.get(f"https://kick.com/api/v2/channels/{username}", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                    res = httpx.get(
+                        f"https://kick.com/api/v2/channels/{username}",
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=10,
+                        follow_redirects=True
+                    )
                     if res.status_code == 200:
                         data = res.json()
                         livestream = data.get("livestream")
@@ -857,7 +858,6 @@ async def background_live_checker(app: Application):
                                 save_live_status(status_data)
                                 
                                 stream_title = livestream.get("session_title", "بث مباشر جديد!")
-                                thumbnail_url = livestream.get("thumbnail", {}).get("url", "")
                                 stream_url = f"https://kick.com/{username}"
                                 
                                 caption = f"🔴 *الستريمر {username} بدأ بث مباشر الآن على Kick!*\n\n📌 *{stream_title}*"
@@ -866,7 +866,6 @@ async def background_live_checker(app: Application):
                                 if target_chat:
                                     await app.bot.send_message(chat_id=target_chat, text=caption, parse_mode="Markdown", reply_markup=kb)
                         else:
-                            # إذا انتهى البث، نقوم بتصفير الحالة ليتم اكتشاف البث القادم
                             status_data[f"kick_{username}"] = None
                 except Exception:
                     pass
@@ -875,7 +874,6 @@ async def background_live_checker(app: Application):
             print(f"Error in background checker: {e}")
 
 async def post_init(application: Application):
-    # تشغيل الفحص التلقائي في الخلفية مع بدء البوت
     asyncio.create_task(background_live_checker(application))
 
 # ----------------------------
@@ -947,7 +945,7 @@ def main():
     # Noop Handler
     app.add_handler(CallbackQueryHandler(lambda update, context: update.callback_query.action() if hasattr(update.callback_query, 'action') else update.callback_query.answer(), pattern=r"^noop$"))
 
-    print("Bot is starting on Railway with Auto-Live Checker...")
+    print("Bot is starting on Railway with httpx and Auto-Live Checker...")
     app.run_polling()
 
 if __name__ == "__main__":
