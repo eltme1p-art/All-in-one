@@ -2,6 +2,8 @@
 import os
 import json
 import re
+import asyncio
+import requests
 import feedparser
 from typing import Dict, Any, List, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
@@ -16,7 +18,7 @@ from telegram.error import Forbidden, BadRequest
 # Settings & Environment
 # ----------------------------
 TOKEN = os.getenv("BOT_TOKEN", "8317257722:AAGu4jMVN4rxLLNKS18xxl8C-k_YwIKdZYk")
-OWNER_ID = 6648914734  # الـ User ID الرقمي للمالك
+OWNER_ID = 6648914734  
 
 DATA_DIR = "bot_data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -27,6 +29,8 @@ ADMINS_FILE = os.path.join(DATA_DIR, "admins.json")
 STATE_FILE = os.path.join(DATA_DIR, "state.json")
 FOLDERS_FILE = os.path.join(DATA_DIR, "folders.json")
 YT_CHANNELS_FILE = os.path.join(DATA_DIR, "yt_channels.json")
+KICK_CHANNELS_FILE = os.path.join(DATA_DIR, "kick_channels.json")
+LIVE_STATUS_FILE = os.path.join(DATA_DIR, "live_status.json")
 
 def load_json(path: str, default):
     try:
@@ -82,6 +86,18 @@ def load_yt_channels():
 def save_yt_channels(data):
     save_json(YT_CHANNELS_FILE, data)
 
+def load_kick_channels():
+    return load_json(KICK_CHANNELS_FILE, {})
+
+def save_kick_channels(data):
+    save_json(KICK_CHANNELS_FILE, data)
+
+def load_live_status():
+    return load_json(LIVE_STATUS_FILE, {})
+
+def save_live_status(data):
+    save_json(LIVE_STATUS_FILE, data)
+
 # ----------------------------
 # Permissions & Helpers
 # ----------------------------
@@ -114,17 +130,18 @@ def pagination(page: int, total_pages: int, prefix: str) -> List[List[InlineKeyb
 # ----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "مرحبا بك في بوت ريسبكت لايف، يرجى العلم بان اوامر البوت لن تعمل معك الا بموافقة من مالك البوت أو المطورين."
+        "مرحبا بك في بوت الإدارة والبث التلقائي، الأوامر جاهزة لخدمتك."
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "ℹ️ الأوامر المتاحة:\n"
-        "• /massage لإنشاء الرسالة\n"
-        "• /send للإرسال\n"
-        "• /folder لإدارة المجلدات\n"
-        "• /add للإضافة\n"
-        "• /search لجلب وتصفح فيديوهات اليوتيوب"
+        "• /massage - إنشاء رسالة جديدة\n"
+        "• /send - إرسال الرسائل المحفوظة\n"
+        "• /folder - إدارة المجلدات\n"
+        "• /add - إضافة قناة يوتيوب أو تيليجرام أو كيك\n"
+        "• /search - تصفح فيديوهات اليوتيوب\n"
+        "• /addkick - إضافة قناة Kick للبث التلقائي"
     )
 
 # ----------------------------
@@ -327,12 +344,10 @@ async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ لا تملك صلاحية إضافة القنوات.")
         return
     if not context.args:
-        await update.message.reply_text("الصيغة الصحيحة:\n/add @username أو آيدي (-100...)")
+        await update.message.reply_text("الصيغة الصحيحة:\n/add @username أو آيدي (-100...) أو يوتيوب:\n/add اسم channel_id النص")
         return
     
-    # التحقق هل هي إضافة يوتيوب أم قناة إرسال عادية
     if len(context.args) >= 3:
-        # يوتيوب: /add اسم channel_id النص
         if not is_owner(uid):
             return await update.message.reply_text("❌ غير مسموح لك")
         try:
@@ -342,12 +357,11 @@ async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             yt_channels = load_yt_channels()
             yt_channels[name] = {"id": channel_id, "text": text}
             save_yt_channels(yt_channels)
-            await update.message.reply_text(f"✔ تمت إضافة قناة اليوتيوب: {name}")
+            await update.message.reply_text(f"✔ تمت إضافة قناة اليوتيوب للتتبع التلقائي: {name}")
         except Exception as e:
             await update.message.reply_text(f"❌ خطأ: {e}")
         return
 
-    # قناة تيليجرام عادية
     ch = sanitize_channel_username(context.args[0])
     if not ch:
         await update.message.reply_text("⚠️ صيغة القناة غير صحيحة.")
@@ -360,7 +374,22 @@ async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=ch, text="✅ تم ربط القناة بنجاح.")
         await update.message.reply_text(f"✅ تم حفظ القناة: {ch}")
     except Exception as e:
-        await update.message.reply_text(f"❌ تأكد أن البوت مشرف بالصلاحيات الكافية في القناة. الخطأ: {e}")
+        await update.message.reply_text(f"❌ تأكد أن البوت مشرف بالصلاحيات. الخطأ: {e}")
+
+# إضافة قناة Kick للبث التلقائي
+async def add_kick_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return await update.message.reply_text("❌ غير مسموح لك")
+    try:
+        # الصيغة: /addkick username تليجرام_ المستهدف
+        username = context.args[0]
+        target_chat = context.args[1]
+        kick_channels = load_kick_channels()
+        kick_channels[username] = {"target_chat": target_chat}
+        save_kick_channels(kick_channels)
+        await update.message.reply_text(f"✔ تمت إضافة قناة Kick: {username} وسيتم إرسال تنبيه البث إلى {target_chat}")
+    except Exception:
+        await update.message.reply_text("❌ الصيغة الصحيحة:\n/addkick kick_username @target_channel_or_id")
 
 async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channels = get_channels()
@@ -424,7 +453,7 @@ async def channels_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # ----------------------------
-# Sending Messages
+# Sending Messages & Management
 # ----------------------------
 async def send_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_perm(update.effective_user.id, "view_messages"):
@@ -703,16 +732,16 @@ def get_latest_video(channel_id):
             thumbnail = entry.media_content[0]["url"]
         else:
             thumbnail = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
-        return title, video_url, thumbnail
+        return title, video_url, thumbnail, video_id
     except Exception:
-        return None, None, None
+        return None, None, None, None
 
 async def yt_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         return await update.message.reply_text("❌ غير مسموح لك")
     channels = load_yt_channels()
     if not channels:
-        return await update.message.reply_text("❌ لا توجد قنوات يوتيوب مضافة. استخدم /add لإضافة قناة مع آيدي القناة والنص.")
+        return await update.message.reply_text("❌ لا توجد قنوات يوتيوب مضافة. استخدم /add للإضافة.")
     keyboard = [[InlineKeyboardButton(name, callback_data=f"ytshow|{name}")] for name in channels]
     await update.message.reply_text("اختر قناة يوتيوب:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -734,7 +763,7 @@ async def yt_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.message.reply_text("❌ القناة غير موجودة")
 
     if action == "ytshow":
-        title, url, thumb = get_latest_video(info["id"])
+        title, url, thumb, _ = get_latest_video(info["id"])
         if not title:
             return await query.message.reply_text("❌ لا يوجد فيديو جديد")
         text = info["text"]
@@ -771,7 +800,7 @@ async def yt_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(
                 chat_id=target_channel,
                 photo=video["thumb"],
-                caption=caption,
+            caption=caption,
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("⤶ الـدخـول للـمـقـطـع ⤷", url=video["url"])]
@@ -780,6 +809,74 @@ async def yt_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("✔ تم الإرسال بنجاح")
         except Exception as e:
             await query.message.reply_text(f"❌ فشل الإرسال:\n{e}")
+
+# ----------------------------
+# Background Auto-Checker (YouTube & Kick Live Streams)
+# ----------------------------
+async def background_live_checker(app: Application):
+    while True:
+        await asyncio.sleep(60) # فحص كل دقيقة
+        try:
+            status_data = load_live_status()
+            
+            # 1. فحص يوتيوب
+            yt_channels = load_yt_channels()
+            for name, info in yt_channels.items():
+                title, url, thumb, video_id = get_latest_video(info["id"])
+                if video_id and status_data.get(f"yt_{name}") != video_id:
+                    # تم نزول فيديو/بث جديد
+                    status_data[f"yt_{name}"] = video_id
+                    save_live_status(status_data)
+                    
+                    # إرسال تلقائي للقنوات المفعّلة للإرسال العام أو القنوات المسجلة
+                    channels = get_channels()
+                    active_tg = [ch for ch, meta in channels.items() if meta.get("active")]
+                    
+                    caption = f"🚨 *فيديو أو بث جديد على يوتيوب!*\n\n🎬 *{title}*\n\n{info['text']}"
+                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ مشاهدة البث/المقطع", url=url)]])
+                    
+                    for ch in active_tg:
+                        try:
+                            await app.bot.send_photo(chat_id=ch, photo=thumb, caption=caption, parse_mode="Markdown", reply_markup=kb)
+                        except Exception:
+                            pass
+
+            # 2. فحص منصة Kick
+            kick_channels = load_kick_channels()
+            for username, meta in kick_channels.items():
+                target_chat = meta.get("target_chat")
+                try:
+                    res = requests.get(f"https://kick.com/api/v2/channels/{username}", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                    if res.status_code == 200:
+                        data = res.json()
+                        livestream = data.get("livestream")
+                        if livestream:
+                            session_id = livestream.get("id")
+                            if status_data.get(f"kick_{username}") != session_id:
+                                status_data[f"kick_{username}"] = session_id
+                                save_live_status(status_data)
+                                
+                                stream_title = livestream.get("session_title", "بث مباشر جديد!")
+                                thumbnail_url = livestream.get("thumbnail", {}).get("url", "")
+                                stream_url = f"https://kick.com/{username}"
+                                
+                                caption = f"🔴 *الستريمر {username} بدأ بث مباشر الآن على Kick!*\n\n📌 *{stream_title}*"
+                                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎥 مشاهدة البث", url=stream_url)]])
+                                
+                                if target_chat:
+                                    await app.bot.send_message(chat_id=target_chat, text=caption, parse_mode="Markdown", reply_markup=kb)
+                        else:
+                            # إذا انتهى البث، نقوم بتصفير الحالة ليتم اكتشاف البث القادم
+                            status_data[f"kick_{username}"] = None
+                except Exception:
+                    pass
+                
+        except Exception as e:
+            print(f"Error in background checker: {e}")
+
+async def post_init(application: Application):
+    # تشغيل الفحص التلقائي في الخلفية مع بدء البوت
+    asyncio.create_task(background_live_checker(application))
 
 # ----------------------------
 # Cancel Handler
@@ -813,7 +910,7 @@ massage_conv = ConversationHandler(
 # Main App Execution
 # ----------------------------
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
 
     # Basics
     app.add_handler(CommandHandler("start", start))
@@ -830,6 +927,7 @@ def main():
 
     # Channels & Add
     app.add_handler(CommandHandler("add", add_channel_cmd))
+    app.add_handler(CommandHandler("addkick", add_kick_channel))
     app.add_handler(CommandHandler("channels", list_channels))
     app.add_handler(CallbackQueryHandler(channels_actions, pattern=r"^channels:"))
 
@@ -847,9 +945,9 @@ def main():
     app.add_handler(CallbackQueryHandler(yt_button_handler, pattern=r"^yt"))
 
     # Noop Handler
-    app.add_handler(CallbackQueryHandler(lambda update, context: update.callback_query.answer(), pattern=r"^noop$"))
+    app.add_handler(CallbackQueryHandler(lambda update, context: update.callback_query.action() if hasattr(update.callback_query, 'action') else update.callback_query.answer(), pattern=r"^noop$"))
 
-    print("Bot is starting on Railway...")
+    print("Bot is starting on Railway with Auto-Live Checker...")
     app.run_polling()
 
 if __name__ == "__main__":
