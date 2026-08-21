@@ -15,10 +15,10 @@ from telegram.ext import (
 from telegram.error import Forbidden, BadRequest
 
 # ----------------------------
-# Settings & Environment
+# Settings & Environment (Railway Config)
 # ----------------------------
 TOKEN = os.getenv("BOT_TOKEN", "8317257722:AAGu4jMVN4rxLLNKS18xxl8C-k_YwIKdZYk")
-OWNER_ID = 6648914734  
+OWNER_ID = int(os.getenv("OWNER_ID", "6648914734"))
 
 DATA_DIR = "bot_data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -102,7 +102,7 @@ def save_live_status(data):
 # Permissions & Helpers
 # ----------------------------
 def is_owner(uid: int) -> bool:
-    return uid == OWNER_ID or uid in [6648914734]
+    return uid == OWNER_ID
 
 def has_perm(uid: int, perm: str) -> bool:
     if is_owner(uid):
@@ -302,7 +302,7 @@ async def massage_preview_actions(update: Update, context: ContextTypes.DEFAULT_
         messages[new_id] = msg
         set_messages(messages)
         try:
-            await q.edit_message_caption(f"✅ تم حفظ الرسالة العامة برقم: {new_id}")
+            await q.edit_message_caption(f"✅ تم حفظ الرسالة العامة برقم: #{new_id}")
         except Exception:
             pass
         context.user_data.pop("new_msg", None)
@@ -311,10 +311,10 @@ async def massage_preview_actions(update: Update, context: ContextTypes.DEFAULT_
     if data == "massage:folder":
         folders = get_folders()
         if not folders:
-            await q.message.reply_text("📭 لا توجد مجلدات.")
+            await q.message.reply_text("📭 لا توجد مجلدات حالياً. أنشئ مجلدًا أولاً عبر /folder")
             return MASSAGE_PREVIEW
         kb = [[InlineKeyboardButton(fname, callback_data=f"massage:addto:{fname}")] for fname in folders.keys()]
-        await q.message.reply_text("اختر المجلد:", reply_markup=InlineKeyboardMarkup(kb))
+        await q.message.reply_text("📁 اختر المجلد لحفظ الرسالة بداخله:", reply_markup=InlineKeyboardMarkup(kb))
         return MASSAGE_PREVIEW
 
     if data.startswith("massage:addto:"):
@@ -323,13 +323,19 @@ async def massage_preview_actions(update: Update, context: ContextTypes.DEFAULT_
         if folder not in folders:
             await q.message.reply_text("⚠️ المجلد غير موجود.")
             return MASSAGE_PREVIEW
-        folder_msgs = folders.get(folder, {})
+        
+        if folders[folder] is None:
+            folders[folder] = {}
+            
+        folder_msgs = folders[folder]
         numeric_ids = [int(i) for i in folder_msgs.keys() if str(i).isdigit()] if folder_msgs else []
         msg_id = str((max(numeric_ids) if numeric_ids else 0) + 1)
+        
         folders[folder][msg_id] = msg
         set_folders(folders)
+        
         try:
-            await q.edit_message_caption(f"✅ تم الحفظ داخل المجلد: {folder} (#{msg_id})")
+            await q.edit_message_caption(f"✅ تم الحفظ بنجاح داخل المجلد: [{folder}] برقم (#{msg_id})")
         except Exception:
             pass
         context.user_data.pop("new_msg", None)
@@ -500,28 +506,30 @@ async def send_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if src == "general":
             messages = get_messages()
             if not messages:
-                await q.edit_message_text("📭 لا توجد رسائل عامة.")
+                await q.edit_message_text("📭 لا توجد رسائل عامة محفوظة.")
                 return
             await render_messages_list(q, context, list(messages.items()), "general", page=0)
             return
         if src == "folder":
             folders = get_folders()
             if not folders:
-                await q.edit_message_text("📭 لا توجد مجلدات.")
+                await q.edit_message_text("📭 لا توجد مجلدات منشأة.")
                 return
-            kb = [[InlineKeyboardButton(fname, callback_data=f"send:choosefolder:{fname}")] for fname in folders.keys()]
-            await q.edit_message_text("اختر مجلد:", reply_markup=InlineKeyboardMarkup(kb))
+            kb = [[InlineKeyboardButton(f"📁 {fname}", callback_data=f"send:choosefolder:{fname}")] for fname in folders.keys()]
+            await q.edit_message_text("📂 اختر المجلد لعرض رسائله:", reply_markup=InlineKeyboardMarkup(kb))
             return
 
     if data.startswith("send:choosefolder:"):
         folder = data.split(":", 2)[2]
         folders = get_folders()
         if folder not in folders or not folders[folder]:
-            await q.edit_message_text("📭 هذا المجلد فارغ.")
+            await q.edit_message_text(f"📭 المجلد [{folder}] فارغ ولا يحتوي على رسائل.")
             return
+        
         state = get_state()
         state[f"current_folder:{q.from_user.id}"] = folder
         set_state(state)
+        
         await render_messages_list(q, context, list(folders[folder].items()), "folder", page=0)
         return
 
@@ -541,8 +549,8 @@ async def send_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 state = get_state()
                 folder = state.get(f"current_folder:{q.from_user.id}")
                 folders = get_folders()
-                if not folder or folder not in folders:
-                    await q.edit_message_text("⚠️ المجلد غير محدد.")
+                if not folder or folder not in folders or not folders[folder]:
+                    await q.edit_message_text("⚠️ حدث خطأ أو أن المجلد أصبح فارغاً. اختر المجلد مرة أخرى من /send")
                     return
                 await render_messages_list(q, context, list(folders[folder].items()), "folder", page)
                 return
@@ -563,14 +571,14 @@ async def send_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = folders.get(folder, {}).get(msg_id)
 
         if not msg:
-            await q.edit_message_text("⚠️ الرسالة غير موجودة.")
+            await q.edit_message_text("⚠️ عذراً، هذه الرسالة لم تعد موجودة.")
             return
 
         if action == "preview":
             kb = [[InlineKeyboardButton(msg["button_text"], url=msg["button_url"])]]
             try:
                 await q.message.reply_photo(photo=msg["photo"], caption=f"*{msg['title']}*", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(kb))
-                await q.edit_message_text(f"✅ تمت المعاينة للرسالة #{msg_id}.")
+                await q.edit_message_text(f"✅ تمت معاينة الرسالة رقم #{msg_id}.")
             except Exception:
                 pass
             return
@@ -581,33 +589,35 @@ async def send_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 messages.pop(msg_id, None)
                 set_messages(messages)
                 await q.edit_message_text(f"🗑 تم حذف الرسالة العامة #{msg_id}.")
-                await render_messages_list(q, context, list(messages.items()), "general", page=0)
+                if messages:
+                    await render_messages_list(q, context, list(messages.items()), "general", page=0)
             else:
                 state = get_state()
                 folder = state.get(f"current_folder:{q.from_user.id}")
                 folders = get_folders()
-                if folder in folders:
+                if folder in folders and msg_id in folders[folder]:
                     folders[folder].pop(msg_id, None)
                     set_folders(folders)
-                await q.edit_message_text(f"🗑 تم حذف الرسالة #{msg_id} من مجلد {folder}.")
-                await render_messages_list(q, context, list(folders.get(folder, {}).items()), "folder", page=0)
+                await q.edit_message_text(f"🗑 تم حذف الرسالة #{msg_id} من مجلد [{folder}].")
+                if folders.get(folder):
+                    await render_messages_list(q, context, list(folders[folder].items()), "folder", page=0)
             return
 
         if action == "choosech":
             channels = get_channels()
             active = [ch for ch, meta in channels.items() if meta.get("active")]
             if not active:
-                await q.edit_message_text("⚠️ لا توجد قنوات مفعّلة.")
+                await q.edit_message_text("⚠️ لا توجد قنوات مفعّلة حالياً للإرسال إليها.")
                 return
             kb_full = [[InlineKeyboardButton(ch, callback_data=f"send:{source_key}:to:{msg_id}:{ch}")] for ch in active]
-            await q.edit_message_text(f"اختر قناة لإرسال الرسالة #{msg_id}:", reply_markup=InlineKeyboardMarkup(kb_full))
+            await q.edit_message_text(f"اختر القناة لإرسال الرسالة #{msg_id}:", reply_markup=InlineKeyboardMarkup(kb_full))
             return
 
         if action == "all":
             channels = get_channels()
             active = [ch for ch, meta in channels.items() if meta.get("active")]
             if not active:
-                await q.edit_message_text("⚠️ لا توجد قنوات مفعّلة.")
+                await q.edit_message_text("⚠️ لا توجد قنوات مفعّلة حالياً.")
                 return
             kb = [[InlineKeyboardButton(msg["button_text"], url=msg["button_url"])]]
             ok, fail = 0, 0
@@ -625,7 +635,7 @@ async def send_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = [[InlineKeyboardButton(msg["button_text"], url=msg["button_url"])]]
             try:
                 await context.bot.send_photo(chat_id=ch, photo=msg["photo"], caption=f"*{msg['title']}*", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(kb))
-                await q.edit_message_text(f"📤 تم إرسال الرسالة #{msg_id} إلى {ch}.")
+                await q.edit_message_text(f"📤 تم إرسال الرسالة #{msg_id} إلى القناة {ch} بنجاح.")
             except Exception as e:
                 await q.edit_message_text(f"❌ فشل الإرسال إلى {ch}: {e}")
             return
@@ -813,11 +823,10 @@ async def yt_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------------------
 async def background_live_checker(app: Application):
     while True:
-        await asyncio.sleep(60) # فحص كل دقيقة
+        await asyncio.sleep(60)
         try:
             status_data = load_live_status()
             
-            # 1. فحص يوتيوب
             yt_channels = load_yt_channels()
             for name, info in yt_channels.items():
                 title, url, thumb, video_id = get_latest_video(info["id"])
@@ -837,7 +846,6 @@ async def background_live_checker(app: Application):
                         except Exception:
                             pass
 
-            # 2. فحص منصة Kick باستخدام httpx
             kick_channels = load_kick_channels()
             for username, meta in kick_channels.items():
                 target_chat = meta.get("target_chat")
@@ -905,7 +913,7 @@ massage_conv = ConversationHandler(
 )
 
 # ----------------------------
-# Main App Execution
+# Main App Execution (Railway Polling Mode)
 # ----------------------------
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
@@ -945,7 +953,7 @@ def main():
     # Noop Handler
     app.add_handler(CallbackQueryHandler(lambda update, context: update.callback_query.action() if hasattr(update.callback_query, 'action') else update.callback_query.answer(), pattern=r"^noop$"))
 
-    print("Bot is starting on Railway with httpx and Auto-Live Checker...")
+    print("Bot is starting on Railway using Polling...")
     app.run_polling()
 
 if __name__ == "__main__":
